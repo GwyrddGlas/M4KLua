@@ -1,0 +1,21 @@
+local blocks = {
+    BLOCK_AIR = 0,
+    BLOCK_GRASS = 1,
+    BLOCK_DIRT = 2,
+    BLOCK_SAND = 3,
+    BLOCK_STONE = 4,
+    BLOCK_BRICKS = 5,
+    BLOCK_GRAVEL = 6,
+    BLOCK_WOOD = 7,
+    BLOCK_LEAVES = 8,
+    BLOCK_COBBLESTONE = 9,
+    BLOCK_WATER = 10,
+    BLOCK_TALL_GRASS = 11,
+    BLOCK_PLAYER_HEAD = 14,
+    BLOCK_PLAYER_BODY = 15,
+    BLOCK_NIL = 255,
+
+    NUMBER_OF_BLOCKS = 16
+}
+
+return blocks
