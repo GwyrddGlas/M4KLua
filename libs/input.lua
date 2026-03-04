@@ -12,21 +12,22 @@ function input.insert(original, substring, offset)
 end
 
 function input.manageInputBuffer(inputBuffer, inputs)
-	if not inputs.keyTyped or not inputs.keySym then
-		return
-	end
-
 	if inputs.keySym == SDLK_BACKSPACE and inputBuffer.cursor > 0 then
-		inputBuffer.buffer = inputBuffer.buffer:sub(1, #(inputBuffer.buffer) - 1)
-		inputBuffer.cursor = inputBuffer.cursor - 1
-	elseif inputs.keySym == SDLK_RETURN and inputBuffer.cursor > 0 then
-		return 1
-	elseif inputs.keyTyped > 31 and inputs.keyTyped < 127 and inputBuffer.cursor < inputBuffer.len then
-		-- // inputBuffer.buffer = input.insert(inputBuffer.buffer, string.char(inputs.keyTyped), inputBuffer.cursor)
-		inputBuffer.buffer = inputBuffer.buffer:sub(1, inputBuffer.cursor) .. string.char(inputs.keyTyped)
-		inputBuffer.cursor = inputBuffer.cursor + 1
-		-- // inputBuffer.buffer = input.insert(inputBuffer.buffer, "", inputBuffer.cursor)
-	end
+        inputBuffer.buffer = inputBuffer.buffer:sub(1, #inputBuffer.buffer - 1)
+        inputBuffer.cursor = inputBuffer.cursor - 1
+        return
+    end
+
+    if inputs.keySym == SDLK_RETURN and inputBuffer.cursor > 0 then
+        return 1
+    end
+
+    if not inputs.keyTyped then return end
+
+    if inputs.keyTyped > 31 and inputs.keyTyped < 127 and inputBuffer.cursor < inputBuffer.len then
+        inputBuffer.buffer = inputBuffer.buffer:sub(1, inputBuffer.cursor) .. string.char(inputs.keyTyped)
+        inputBuffer.cursor = inputBuffer.cursor + 1
+    end
 end
 
 return input
