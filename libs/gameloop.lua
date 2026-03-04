@@ -49,6 +49,13 @@ local coordPass = {x = 0, y = 0, z = 0}
 local blockSelect = {x = 0, y = 0, z = 0}
 local blockSelectOffset = {x = 0, y = 0, z = 0}
 
+local _blockRayPos   = {x = 0, y = 0, z = 0}
+local _coordPassTemp = {x = 0, y = 0, z = 0}
+local _blockOffTemp  = {x = 0, y = 0, z = 0}
+
+local _lastLookupHash  = -1
+local _lastChunkResult = nil
+
 local hmm
 local world = {
 	player = {
@@ -180,405 +187,424 @@ function gameLoop.gameLoop(canvas, inputs)
 	end
 end
 
-function gameLoop.gameplay(canvas, inputs)
-	local canvas = canvas
-	local chunks = world.chunk
-	local options = options.options
+local blockRayPosition = {x = 0, y = 0, z = 0}
 
-	if options.trapMouse > 0 then
+
+local function lookupChunk(chunks, bx, by, bz)
+	local cx = band(rshift(bx, 6), 0x3FF)
+	local cy = band(rshift(by, 6), 0x3FF)
+	local cz = band(rshift(bz, 6), 0x3FF)
+	local hash = bor(cx, lshift(cy, 10), lshift(cz, 20)) + 1
+
+	-- skip binary search if same chunk as last step
+	if hash == _lastLookupHash then
+		return _lastChunkResult
+	end
+
+	_lastLookupHash  = hash
+	_lastChunkResult = nil
+
+	local first  = 0
+	local last   = Chunk.CHUNKARR_SIZE - 1
+	local middle = floor((Chunk.CHUNKARR_SIZE - 1) / 2)
+
+	while first <= last do
+		local ch = chunks[middle]
+		if ch.coordHash > hash then
+			first = middle + 1
+		elseif ch.coordHash == hash then
+			if ch and ch.loaded > 0 then
+				_lastChunkResult = ch
+			end
+			break
+		else
+			last = middle - 1
+		end
+		middle = int((first + last) / 2)
+	end
+
+	return _lastChunkResult
+end
+
+local function processBlockInteraction(inputs, world, player, blockSelected, blockSelect, blockSelectOffset, activeSlot, guiOn, gamePopup)
+	-- break block
+	if (inputs.mouse.left or inputs.keyboard.n) and blockSelected then
+		local blockid = World.getBlock(world, blockSelect.x, blockSelect.y, blockSelect.z)
+
+		if blockid ~= blocks.BLOCK_PLAYER_BODY
+		and blockid ~= blocks.BLOCK_PLAYER_HEAD
+		and blockid ~= blocks.BLOCK_AIR
+		and blockid ~= blocks.BLOCK_WATER then
+			Inventory.transferIn(player.inventory, {amount = 1, durability = 1, blockid = blockid})
+			World.setBlock(world, blockSelect.x, blockSelect.y, blockSelect.z, 0, 1)
+		end
+	end
+
+	-- place block
+	local ox = blockSelectOffset.x + blockSelect.x
+	local oy = blockSelectOffset.y + blockSelect.y
+	local oz = blockSelectOffset.z + blockSelect.z
+
+	if (inputs.mouse.right or inputs.keyboard.m) and blockSelected then
+		if (
+			abs(player.pos.x - .5 - ox) >= .8 or
+			abs(player.pos.y - oy)       >= 1.45 or
+			abs(player.pos.z - .5 - oz)  >= .8
+		) and activeSlot.amount > 0 then
+			local blockSet = World.setBlock(world, ox, oy, oz, activeSlot.blockid, 1)
+			if blockSet then
+				activeSlot.amount = activeSlot.amount - 1
+				if activeSlot.amount <= 0 then
+					activeSlot.blockid = 0
+				end
+			end
+		end
+	end
+end
+
+local function processHotbarInput(inputs, player, gamePopup)
+	-- swap offhand
+	if inputs.keyboard.f then
+		local left, right = InvSlot.swap(
+			player.inventory.hotbar[player.inventory.hotbarSelect],
+			player.inventory.offhand
+		)
+		player.inventory.hotbar[player.inventory.hotbarSelect] = left
+		player.inventory.offhand = right
+	end
+
+	-- scroll wheel
+	if inputs.mouse.wheel ~= 0 then
+		player.inventory.hotbarSelect = nmod(player.inventory.hotbarSelect - inputs.mouse.wheel, 9)
+		inputs.mouse.wheel = 0
+	end
+
+	-- number keys
+	for i = 0, 9 do
+		if inputs.keyboard["num" .. tostring(i)] then
+			player.inventory.hotbarSelect = (i == 0 and 8 or i - 1)
+		end
+	end
+end
+
+local function castRay(
+	chunks, player, effectFov, effectDrawDistance,
+	pixelX, pixelY,
+	headInWater, guiOn, gamePopup,
+
+	currentSelectedPass, f26_in
+)
+	local rayOffsetX = (pixelX - gui.BUFFER_HALF_W) / effectFov
+	local rayOffsetY = (pixelY - gui.BUFFER_HALF_H) / effectFov
+
+	local pVVy = player.vectorV.y
+	local pVVx = player.vectorV.x
+	local pVHy = player.vectorH.y
+	local pVHx = player.vectorH.x
+
+	local f22 = pVVy + rayOffsetY * pVVx
+	local f23 = rayOffsetY * pVVy - pVVx         -- (f21=1 baked in)
+	local f24 = rayOffsetX * pVHy + f22 * pVHx
+	local f25 = f22 * pVHy - rayOffsetX * pVHx
+
+	local rayDistanceLimit = effectDrawDistance
+	local finalPixelColor  = 0
+	local pixelShade       = 0
+	local pixelMist        = 255
+	local newSelectedPass  = currentSelectedPass
+	local f26              = f26_in
+
+	local ppx = player.pos.x
+	local ppy = player.pos.y
+	local ppz = player.pos.z
+
+	-- reset chunk cache per ray (positions jump around between pixels)
+	_lastLookupHash = -1
+
+	for blockFace = 0, 2 do
+		local f27
+		if    blockFace == 0 then f27 = f24
+		elseif blockFace == 1 then f27 = f23
+		else                       f27 = f25
+		end
+
+		local f28 = 1 / ((f27 < 0) and (-f27) or f27)
+		local f29 = f24 * f28
+		local f30 = f23 * f28
+		local f31 = f25 * f28
+
+		local f32
+		if    blockFace == 0 then f32 = ppx - floor(ppx)
+		elseif blockFace == 1 then f32 = ppy - floor(ppy)
+		else                       f32 = ppz - floor(ppz)
+		end
+
+		if f27 > 0 then f32 = 1 - f32 end
+
+		local f33 = f28 * f32
+		local f34 = ppx + f29 * f32
+		local f35 = ppy + f30 * f32
+		local f36 = ppz + f31 * f32
+
+		if f27 < 0 then
+			if    blockFace == 0 then f34 = f34 - 1
+			elseif blockFace == 1 then f35 = f35 - 1
+			else                       f36 = f36 - 1
+			end
+		end
+
+		while f33 < rayDistanceLimit do
+			local bx = floor(f34)
+			local by = floor(f35)
+			local bz = floor(f36)
+
+			local intersectedBlock = 0
+
+			-- guard against sentinel value
+			if rshift(bx, 6) ~= 1e8 and rshift(by, 6) ~= 1e8 and rshift(bz, 6) ~= 1e8 then
+				local ch = lookupChunk(chunks, bx, by, bz)
+				if ch then
+					intersectedBlock = ch.blocks[
+						nmod(bx, 64) +
+						lshift(nmod(by, 64), 6) +
+						lshift(nmod(bz, 64), 12)
+					] or 0
+				end
+			end
+
+			if intersectedBlock ~= blocks.BLOCK_AIR
+			and not (headInWater and intersectedBlock == blocks.BLOCK_WATER) then
+				-- texture coordinates
+				local textureX, textureY
+				if blockFace == 1 then
+					textureX = band(floor(f34 * 16), 0xF)
+					textureY = band(floor(f36 * 16), 0xF)
+					if f30 < 0 then textureY = textureY + 32 end
+				else
+					textureX = band(floor((f34 + f36) * 16), 0xF)
+					textureY = band(floor(f35 * 16), 0xF) + 16
+				end
+
+				local pixelColor = 0xFFFFFF
+				local isSelected = blockSelected
+					and bx == blockSelect.x
+					and by == blockSelect.y
+					and bz == blockSelect.z
+
+				if not isSelected
+				or (textureX > 0 and textureX < 15 and textureY % 16 > 0 and textureY % 16 < 15)
+				or not guiOn
+				or gamePopup > 0 then
+					if intersectedBlock >= blocks.NUMBER_OF_BLOCKS then
+						pixelColor = 0xFF0000
+					else
+						pixelColor = texts.textures[
+							textureX + textureY * 16 + intersectedBlock * 256 * 3
+						]
+					end
+				end
+
+				-- centre-crosshair block selection
+				if f33 < f26 and (
+					pixelX == gui.BUFFER_HALF_W and pixelY == gui.BUFFER_HALF_H
+				) and intersectedBlock ~= blocks.BLOCK_WATER then
+					newSelectedPass = true
+
+					_coordPassTemp.x = bx
+					_coordPassTemp.y = by
+					_coordPassTemp.z = bz
+
+					_blockOffTemp.x = 0
+					_blockOffTemp.y = 0
+					_blockOffTemp.z = 0
+
+					local bullshit = 1 - 2 * (f27 > 0 and 1 or 0)
+					if    blockFace == 0 then _blockOffTemp.x = bullshit
+					elseif blockFace == 1 then _blockOffTemp.y = bullshit
+					else                       _blockOffTemp.z = bullshit
+					end
+
+					f26 = f33
+				end
+
+				if pixelColor > 0 then
+					finalPixelColor  = pixelColor
+					pixelMist        = 255 - int(f33 / effectDrawDistance * 255)
+					pixelShade       = 255 - (blockFace + 2) % 3 * 50
+					rayDistanceLimit = f33
+				end
+			end
+
+			f34 = f34 + f29
+			f35 = f35 + f30
+			f36 = f36 + f31
+			f33 = f33 + f28
+		end
+	end
+
+	return finalPixelColor, pixelShade, pixelMist, newSelectedPass, f26
+end
+
+function gameLoop.gameplay(canvas, inputs)
+	local chunks  = world.chunk
+	local opts    = options.options
+
+	if opts.trapMouse > 0 then
 		compat.setMouse(true)
 	end
 
-	local fpx, fpy, fpz = round(player.pos.x), round(player.pos.y), round(player.pos.z)
-	local headInWater = World.getBlock(world, fpx, fpy, fpz) == blocks.BLOCK_WATER
+	-- player head/feet water check
+	local fpx = round(player.pos.x)
+	local fpy = round(player.pos.y)
+	local fpz = round(player.pos.z)
+	local headInWater = World.getBlock(world, fpx, fpy,     fpz) == blocks.BLOCK_WATER
 	local feetInWater = World.getBlock(world, fpx, fpy + 1, fpz) == blocks.BLOCK_WATER
 
-	local effectDrawDistance = (headInWater and 10 or options.drawDistance)
+	local effectDrawDistance = headInWater and 10 or opts.drawDistance
 
+	-- direction vectors
 	player.vectorH.x = sin(player.hRot)
 	player.vectorH.y = cos(player.hRot)
 	player.vectorV.x = sin(player.vRot)
 	player.vectorV.y = cos(player.vRot)
 
-	local timeCoef = 0
-
+	-- day/night sky colour
+	local timeCoef
 	if world.dayNightMode == 0 then
-		timeCoef = (world.time % 102944) / 16384
-		timeCoef = sin(timeCoef)
+		timeCoef = sin((world.time % 102944) / 16384)
 		timeCoef = timeCoef / sqrt(timeCoef * timeCoef + (1 / 128))
 		timeCoef = (timeCoef + 1) / 2
 	else
-		timeCoef = (2 - world.dayNightMode)
+		timeCoef = 2 - world.dayNightMode
 	end
 
-	local color
-
+	local skyR, skyG, skyB
 	if headInWater then
-		color = {
-			48  * timeCoef,
-			96  * timeCoef,
-			200 * timeCoef
-		}
+		skyR, skyG, skyB = 48 * timeCoef, 96 * timeCoef, 200 * timeCoef
 	else
-		color = {
-			153 * timeCoef,
-			204 * timeCoef,
-			255 * timeCoef
-		}
+		skyR, skyG, skyB = 153 * timeCoef, 204 * timeCoef, 255 * timeCoef
 	end
 
-	compat.clear(canvas, unpack(color))
+	compat.clear(canvas, skyR, skyG, skyB)
 
+	-- pause toggle
 	if inputs.keyboard.esc then
 		gamePopup = (gamePopup == 1 and 0 or 1)
 	end
 
+	-- FPS counter
 	fps_count = fps_count + 1
-
 	if fps_lastmil < getTicks() - 1000 then
 		fps_lastmil = getTicks()
-		fps_now = fps_count
-		fps_count = 0
+		fps_now     = fps_count
+		fps_count   = 0
 	end
 
+	-- physics ticks
 	while getTicks() - l > 10 do
 		world.time = world.time + 1
 		l = l + 10
 		gameLoop.processMovement(inputs, feetInWater)
 	end
 
+	-- HUD input (only when not in a popup)
 	if gamePopup == popup.POPUP_HUD then
 		activeSlot = player.inventory.hotbar[player.inventory.hotbarSelect]
 
-		if (inputs.mouse.left or inputs.keyboard.n) and blockSelected then
-			local blockid = World.getBlock(
-				world,
-				blockSelect.x,
-				blockSelect.y,
-				blockSelect.z
-			)
+		processBlockInteraction(inputs, world, player, blockSelected, blockSelect, blockSelectOffset, activeSlot, guiOn, gamePopup)
 
-			if blockid ~= blocks.BLOCK_PLAYER_BODY and blockid ~= blocks.BLOCK_PLAYER_HEAD and blockid ~= blocks.BLOCK_AIR and blockid ~= blocks.BLOCK_WATER then
-				local pickedUp = {
-					amount = 1,
-					durability = 1,
-					blockid = blockid,
-				}
-
-				Inventory.transferIn(player.inventory, pickedUp)
-
-				World.setBlock(
-					world,
-					blockSelect.x,
-					blockSelect.y,
-					blockSelect.z,
-					0, 1
-				)
-			end
-		end
-
+		-- the offset accumulation from the original
 		blockSelectOffset.x = blockSelectOffset.x + blockSelect.x
 		blockSelectOffset.y = blockSelectOffset.y + blockSelect.y
 		blockSelectOffset.z = blockSelectOffset.z + blockSelect.z
 
-		if (inputs.mouse.right or inputs.keyboard.m) and blockSelected then
-			if (
-				abs(player.pos.x - .5 - blockSelectOffset.x) >= .8 or
-				abs(player.pos.y - blockSelectOffset.y) >= 1.45 or
-				abs(player.pos.z - .5 - blockSelectOffset.z) >= .8
-			) and activeSlot.amount > 0 then
-				local blockSet = World.setBlock(
-					world,
-					blockSelectOffset.x,
-					blockSelectOffset.y,
-					blockSelectOffset.z,
-					activeSlot.blockid, 1
-				)
+		processHotbarInput(inputs, player, gamePopup)
 
-				if blockSet then
-					activeSlot.amount = activeSlot.amount - 1
-
-					if activeSlot.amount <= 0 then
-						activeSlot.blockid = 0
-					end
-				end
-			end
-		end
-
-		if inputs.keyboard.f then
-			local left, right = InvSlot.swap(player.inventory.hotbar[player.inventory.hotbarSelect], player.inventory.offhand)
-
-			player.inventory.hotbar[player.inventory.hotbarSelect] = left
-			player.inventory.offhand = right
-		end
-
-		if inputs.mouse.wheel ~= 0 then
-			player.inventory.hotbarSelect = nmod(player.inventory.hotbarSelect - inputs.mouse.wheel, 9)
-			inputs.mouse.wheel = 0
-		end
-
-		for i = 0, 9 do
-			if inputs.keyboard["num" .. tostring(i)] then
-				player.inventory.hotbarSelect = (i == 0 and 8 or i - 1)
-			end
-		end
-
-		if inputs.keyboard.f1 then
-			guiOn = not guiOn
-		end
-
-		if inputs.keyboard.f3 then
-			debugOn = not debugOn
-		end
-
+		if inputs.keyboard.f1 then guiOn = not guiOn end
+		if inputs.keyboard.f3 then debugOn = not debugOn end
 		if inputs.keyboard.f4 then
 			gamePopup = (gamePopup == popup.POPUP_ADVANCED_DEBUG and 0 or 4)
 		end
-
 		if inputs.keyboard.t then
 			inputs.keyTyped = nil
 			gamePopup = popup.POPUP_CHAT
 		end
-
 		if inputs.keyboard.e_fix then
 			inputs.keyboard.e_fix = nil
 			gamePopup = popup.POPUP_INVENTORY
 		end
 	end
 
-	local effectFov = options.fov
+	local effectFov = opts.fov + (headInWater and 20 or 0)
 
-	if headInWater then
-		effectFov = effectFov + 20
-	end
-
-	selectedPass = false
-
-	-- // the worst part (raycasting)
+	-- --------------------------------------------------------
+	-- raycasting pixel loop
+	-- --------------------------------------------------------
+	local newSelectedPass = false
+	local f26 = 5   -- nearest selected block distance
 
 	for pixelX = 0, gui.BUFFER_W - 1 do
-		local rayOffsetX = (pixelX - gui.BUFFER_HALF_W) / effectFov
-
 		for pixelY = 0, gui.BUFFER_H - 1 do
-			local pixelShade = 0
-			local pixelMist = 255
-			local finalPixelColor = 0
-			local rayOffsetY = (pixelY - gui.BUFFER_HALF_H) / effectFov
 
-			f21 = 1
-			f26 = 5
-			f22 = f21 * player.vectorV.y + rayOffsetY * player.vectorV.x
-			f23 = rayOffsetY * player.vectorV.y - f21 * player.vectorV.x
-			f24 = rayOffsetX * player.vectorH.y + f22 * player.vectorH.x
-			f25 = f22 * player.vectorH.y - rayOffsetX * player.vectorH.x
+			local finalPixelColor, pixelShade, pixelMist, hitSelected, new_f26 =
+				castRay(
+					chunks, player, effectFov, effectDrawDistance,
+					pixelX, pixelY,
+					headInWater, guiOn, gamePopup,
+					newSelectedPass, f26
+				)
 
-			local rayDistanceLimit = effectDrawDistance
+			-- propagate selection state across pixels
+			if hitSelected and not newSelectedPass then
+				newSelectedPass = true
+				f26 = new_f26
 
-			for blockFace = 0, 2 do
-				f27 = f24
-
-				if blockFace == 1 then
-					f27 = f23
-				elseif blockFace == 2 then
-					f27 = f25
-				end
-
-				f28 = 1 / ((f27 < 0) and (-1 * f27) or f27)
-				f29 = f24 * f28
-				f30 = f23 * f28
-				f31 = f25 * f28
-				f32 = player.pos.x - floor(player.pos.x)
-
-				if blockFace == 1 then
-					f32 = player.pos.y - floor(player.pos.y)
-				elseif blockFace == 2 then
-					f32 = player.pos.z - floor(player.pos.z)
-				end
-
-				if f27 > 0 then
-					f32 = (1 - f32)
-				end
-
-				f33 = f28 * f32
-				f34 = player.pos.x + f29 * f32
-				f35 = player.pos.y + f30 * f32
-				f36 = player.pos.z + f31 * f32
-
-				if f27 < 0 then
-					if blockFace == 0 then
-						f34 = f34 - 1
-					elseif blockFace == 1 then
-						f35 = f35 - 1
-					elseif blockFace == 2 then
-						f36 = f36 - 1
-					end
-				end
-
-
-				-- // god i hate this part
-
-				local intersectedBlock = 0
-				local blockRayPosition = {x = 0, y = 0, z = 0}
-
-				while f33 < rayDistanceLimit do
-					blockRayPosition.x = floor(f34)
-					blockRayPosition.y = floor(f35)
-					blockRayPosition.z = floor(f36)
-
-					local lookup_now = {
-						rshift(blockRayPosition.x, 6),
-						rshift(blockRayPosition.y, 6),
-						rshift(blockRayPosition.z, 6)
-					}
-
-					if lookup_now[1] ~= 1e8 or lookup_now[2] ~= 1e8 or lookup_now[3] ~= 1e8 then
-						lookup_now[1] = band(lookup_now[1], 0x3FF)
-						lookup_now[2] = band(lookup_now[2], 0x3FF)
-						lookup_now[3] = band(lookup_now[3], 0x3FF)
-
-						lookup_now[2] = lshift(lookup_now[2], 10)
-						lookup_now[3] = lshift(lookup_now[3], 20)
-
-						local lookup_hash = bor(lookup_now[1], lookup_now[2], lookup_now[3]) + 1
-
-						local lookup_first = 0
-						local lookup_last = Chunk.CHUNKARR_SIZE - 1
-						local lookup_middle = floor((Chunk.CHUNKARR_SIZE - 1) / 2)
-
-						while lookup_first <= lookup_last do
-							if chunks[lookup_middle].coordHash > lookup_hash then
-								lookup_first = lookup_middle + 1
-							elseif chunks[lookup_middle].coordHash == lookup_hash then
-								chunk = chunks[lookup_middle]
-
-								if chunk and chunk.loaded > 0 then
-									intersectedBlock = chunk.blocks[
-										nmod(blockRayPosition.x, 64) +
-										lshift(nmod(blockRayPosition.y, 64), 6) +
-										lshift(nmod(blockRayPosition.z, 64), 12)
-									] or 0
-								end
-
-								break
-							else
-								lookup_last = lookup_middle - 1
-							end
-
-							lookup_middle = int((lookup_first + lookup_last) / 2)
-						end
-
-						chunk = nil
-					end
-
-					if intersectedBlock ~= blocks.BLOCK_AIR and not (headInWater and intersectedBlock == blocks.BLOCK_WATER) then
-						local textureX = band(floor((f34 + f36) * 16), 0xF)
-						local textureY = band(floor(f35 * 16), 0xF) + 16
-
-						if blockFace == 1 then
-							textureX = band(floor(f34 * 16), 0xF)
-							textureY = band(floor(f36 * 16), 0xF)
-
-							if f30 < 0 then
-								textureY = textureY + 32
-							end
-						end
-
-						local pixelColor = 0xFFFFFF
-
-						if (
-							not blockSelected or
-							blockRayPosition.x ~= blockSelect.x or blockRayPosition.y ~= blockSelect.y or blockRayPosition.z ~= blockSelect.z
-						) or (
-							textureX > 0
-							and textureY % 16 > 0
-							and textureX < 15
-							and textureY % 16 < 15
-						) or not guiOn or gamePopup > 0 then
-							if intersectedBlock >= blocks.NUMBER_OF_BLOCKS then
-								pixelColor = 0xFF0000
-							else
-								pixelColor = texts.textures[
-									textureX + (textureY * 16) + intersectedBlock * 256 * 3
-								]
-							end
-						end
-
-						if f33 < f26 and (
-							(
-								false -- // options.trapMouse == 0
-								and pixelX == int(inputs.mouse.x / gui.BUFFER_SCALE)
-								and pixelY == int(inputs.mouse.y / gui.BUFFER_SCALE)
-							) or (
-								true -- // options.trapMouse > 1
-								and pixelX == gui.BUFFER_HALF_W
-								and pixelY == gui.BUFFER_HALF_H
-							)
-						) and intersectedBlock ~= blocks.BLOCK_WATER then
-							selectedPass = true
-							coordPass = blockRayPosition
-							blockSelectOffset = {x = 0, y = 0, z = 0}
-
-							local bullshit = 1 - 2 * (f27 > 0 and 1 or 0)
-
-							if blockFace == 0 then
-								blockSelectOffset.x = bullshit
-							elseif blockFace == 1 then
-								blockSelectOffset.y = bullshit
-							elseif blockFace == 2 then
-								blockSelectOffset.z = bullshit
-							end
-
-							f26 = f33
-						end
-
-						if pixelColor > 0 then
-							finalPixelColor = pixelColor
-							pixelMist = 255 - int(f33 / effectDrawDistance * 255)
-							pixelShade = 255 - (blockFace + 2) % 3 * 50
-							rayDistanceLimit = f33
-						end
-					end
-
-					f34 = f34 + f29
-					f35 = f35 + f30
-					f36 = f36 + f31
-					f33 = f33 + f28
-				end
+				coordPass.x      = _coordPassTemp.x
+				coordPass.y      = _coordPassTemp.y
+				coordPass.z      = _coordPassTemp.z
+				blockSelectOffset.x = _blockOffTemp.x
+				blockSelectOffset.y = _blockOffTemp.y
+				blockSelectOffset.z = _blockOffTemp.z
 			end
 
-			if true --[[options.trapMouse > 1]] and ((pixelX == gui.BUFFER_HALF_W and abs(gui.BUFFER_HALF_H - pixelY) < 4) or (pixelY == gui.BUFFER_HALF_H and abs(gui.BUFFER_HALF_W - pixelX) < 4)) then
+			-- crosshair (inverted)
+			if (pixelX == gui.BUFFER_HALF_W and abs(gui.BUFFER_HALF_H - pixelY) < 4)
+			or (pixelY == gui.BUFFER_HALF_H and abs(gui.BUFFER_HALF_W - pixelX) < 4) then
 				finalPixelColor = 0x1000000 - finalPixelColor
 			end
 
+			-- write pixel
 			if finalPixelColor > 0 then
 				setColor(
 					canvas,
 					rshift(band(rshift(finalPixelColor, 16), 0xFF) * pixelShade, 8),
-					rshift(band(rshift(finalPixelColor, 8), 0xFF) * pixelShade, 8),
-					rshift(band(finalPixelColor, 0xFF) * pixelShade, 8),
-					(options.fogType == 1 and sqrt(pixelMist) * 16 or pixelMist)
+					rshift(band(rshift(finalPixelColor,  8), 0xFF) * pixelShade, 8),
+					rshift(band(finalPixelColor,          0xFF)    * pixelShade, 8),
+					opts.fogType == 1 and sqrt(pixelMist) * 16 or pixelMist
 				)
 			else
-				setColor(canvas, unpack(color))
+				setColor(canvas, skyR, skyG, skyB)
 			end
 
 			gui.points(canvas, pixelX, pixelY)
 		end
 	end
 
+	-- underwater overlay
 	if headInWater then
 		setColor(canvas, 16, 32, 255, 128)
 		gui.fill_rect(canvas, backgroundRect)
 	end
 
-	blockSelected = selectedPass
-	blockSelect = coordPass
+	-- commit block selection for this frame
+	blockSelected = newSelectedPass
+	blockSelect   = coordPass
 
+	-- scale mouse coords
 	inputs.mouse.x = inputs.mouse.x / gui.BUFFER_SCALE
 	inputs.mouse.y = inputs.mouse.y / gui.BUFFER_SCALE
 
 	gameLoop.drawPopup(canvas, inputs)
-	-- // and there we have it folks, the end of this nonsense
 end
 
 function gameLoop.drawPopup(canvas, inputs)

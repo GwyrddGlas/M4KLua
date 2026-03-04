@@ -138,7 +138,7 @@ function love.draw()
     lg.printf("FPS: " .. love.timer.getFPS() ..
     "\nRam: " .. tostring(math.floor(collectgarbage("count") / 1024) + 100) .. " MB" ..
     "\nVRam: " .. tostring(math.floor(stats.texturememory / 1024 / 1024)) .. " MB" ..
-    "\nDrawCalls: " .. tostring(math.floor(stats.drawcalls)) ..
+    "\nDrawCalls: " .. tostring(math.floor(stats.drawcalls)),
     5, 12, lg.getWidth(), "left")
 	
 end
