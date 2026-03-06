@@ -290,6 +290,7 @@ end
 local function castRay(
 	chunks, player, effectFov, effectDrawDistance,
 	pixelX, pixelY,
+	centreX, centreY,
 	headInWater, guiOn, gamePopup,
 
 	currentSelectedPass, f26_in
@@ -303,7 +304,7 @@ local function castRay(
 	local pVHx = player.vectorH.x
 
 	local f22 = pVVy + rayOffsetY * pVVx
-	local f23 = rayOffsetY * pVVy - pVVx         -- (f21=1 baked in)
+	local f23 = rayOffsetY * pVVy - pVVx
 	local f24 = rayOffsetX * pVHy + f22 * pVHx
 	local f25 = f22 * pVHy - rayOffsetX * pVHx
 
@@ -318,7 +319,6 @@ local function castRay(
 	local ppy = player.pos.y
 	local ppz = player.pos.z
 
-	-- reset chunk cache per ray (positions jump around between pixels)
 	_lastLookupHash = -1
 
 	for blockFace = 0, 2 do
@@ -360,7 +360,6 @@ local function castRay(
 
 			local intersectedBlock = 0
 
-			-- guard against sentinel value
 			if rshift(bx, 6) ~= 1e8 and rshift(by, 6) ~= 1e8 and rshift(bz, 6) ~= 1e8 then
 				local ch = lookupChunk(chunks, bx, by, bz)
 				if ch then
@@ -374,7 +373,6 @@ local function castRay(
 
 			if intersectedBlock ~= blocks.BLOCK_AIR
 			and not (headInWater and intersectedBlock == blocks.BLOCK_WATER) then
-				-- texture coordinates
 				local textureX, textureY
 				if blockFace == 1 then
 					textureX = band(floor(f34 * 16), 0xF)
@@ -404,9 +402,9 @@ local function castRay(
 					end
 				end
 
-				-- centre-crosshair block selection
+				-- use centreX/centreY instead of hardcoded half-buffer constants
 				if f33 < f26 and (
-					pixelX == gui.BUFFER_HALF_W and pixelY == gui.BUFFER_HALF_H
+					pixelX == centreX and pixelY == centreY
 				) and intersectedBlock ~= blocks.BLOCK_WATER then
 					newSelectedPass = true
 
@@ -453,7 +451,6 @@ function gameLoop.gameplay(canvas, inputs)
 		compat.setMouse(true)
 	end
 
-	-- player head/feet water check
 	local fpx = round(player.pos.x)
 	local fpy = round(player.pos.y)
 	local fpz = round(player.pos.z)
@@ -462,13 +459,11 @@ function gameLoop.gameplay(canvas, inputs)
 
 	local effectDrawDistance = headInWater and 10 or opts.drawDistance
 
-	-- direction vectors
 	player.vectorH.x = sin(player.hRot)
 	player.vectorH.y = cos(player.hRot)
 	player.vectorV.x = sin(player.vRot)
 	player.vectorV.y = cos(player.vRot)
 
-	-- day/night sky colour
 	local timeCoef
 	if world.dayNightMode == 0 then
 		timeCoef = sin((world.time % 102944) / 16384)
@@ -487,12 +482,10 @@ function gameLoop.gameplay(canvas, inputs)
 
 	compat.clear(canvas, skyR, skyG, skyB)
 
-	-- pause toggle
 	if inputs.keyboard.esc then
 		gamePopup = (gamePopup == 1 and 0 or 1)
 	end
 
-	-- FPS counter
 	fps_count = fps_count + 1
 	if fps_lastmil < getTicks() - 1000 then
 		fps_lastmil = getTicks()
@@ -500,20 +493,17 @@ function gameLoop.gameplay(canvas, inputs)
 		fps_count   = 0
 	end
 
-	-- physics ticks
 	while getTicks() - l > 10 do
 		world.time = world.time + 1
 		l = l + 10
 		gameLoop.processMovement(inputs, feetInWater)
 	end
 
-	-- HUD input (only when not in a popup)
 	if gamePopup == popup.POPUP_HUD then
 		activeSlot = player.inventory.hotbar[player.inventory.hotbarSelect]
 
 		processBlockInteraction(inputs, world, player, blockSelected, blockSelect, blockSelectOffset, activeSlot, guiOn, gamePopup)
 
-		-- the offset accumulation from the original
 		blockSelectOffset.x = blockSelectOffset.x + blockSelect.x
 		blockSelectOffset.y = blockSelectOffset.y + blockSelect.y
 		blockSelectOffset.z = blockSelectOffset.z + blockSelect.z
@@ -537,43 +527,42 @@ function gameLoop.gameplay(canvas, inputs)
 
 	local effectFov = opts.fov + (headInWater and 20 or 0)
 
-	-- --------------------------------------------------------
-	-- raycasting pixel loop
-	-- --------------------------------------------------------
 	local newSelectedPass = false
-	local f26 = 5   -- nearest selected block distance
+	local f26 = 5
 
-	for pixelX = 0, gui.BUFFER_W - 1 do
-		for pixelY = 0, gui.BUFFER_H - 1 do
+	local STEP = 2
+	local centreX = floor(gui.BUFFER_HALF_W / STEP) * STEP
+	local centreY = floor(gui.BUFFER_HALF_H / STEP) * STEP
+
+	for pixelX = 0, gui.BUFFER_W - 1, STEP do
+		for pixelY = 0, gui.BUFFER_H - 1, STEP do
 
 			local finalPixelColor, pixelShade, pixelMist, hitSelected, new_f26 =
 				castRay(
 					chunks, player, effectFov, effectDrawDistance,
 					pixelX, pixelY,
+					centreX, centreY,
 					headInWater, guiOn, gamePopup,
 					newSelectedPass, f26
 				)
 
-			-- propagate selection state across pixels
 			if hitSelected and not newSelectedPass then
 				newSelectedPass = true
 				f26 = new_f26
 
-				coordPass.x      = _coordPassTemp.x
-				coordPass.y      = _coordPassTemp.y
-				coordPass.z      = _coordPassTemp.z
+				coordPass.x         = _coordPassTemp.x
+				coordPass.y         = _coordPassTemp.y
+				coordPass.z         = _coordPassTemp.z
 				blockSelectOffset.x = _blockOffTemp.x
 				blockSelectOffset.y = _blockOffTemp.y
 				blockSelectOffset.z = _blockOffTemp.z
 			end
 
-			-- crosshair (inverted)
-			if (pixelX == gui.BUFFER_HALF_W and abs(gui.BUFFER_HALF_H - pixelY) < 4)
-			or (pixelY == gui.BUFFER_HALF_H and abs(gui.BUFFER_HALF_W - pixelX) < 4) then
+			if (pixelX == centreX and abs(centreY - pixelY) < 4)
+			or (pixelY == centreY and abs(centreX - pixelX) < 4) then
 				finalPixelColor = 0x1000000 - finalPixelColor
 			end
 
-			-- write pixel
 			if finalPixelColor > 0 then
 				setColor(
 					canvas,
@@ -586,21 +575,23 @@ function gameLoop.gameplay(canvas, inputs)
 				setColor(canvas, skyR, skyG, skyB)
 			end
 
-			gui.points(canvas, pixelX, pixelY)
+			gui.fill_rect(canvas, {
+				x = pixelX,
+				y = pixelY,
+				w = STEP,
+				h = STEP
+			})
 		end
 	end
 
-	-- underwater overlay
 	if headInWater then
 		setColor(canvas, 16, 32, 255, 128)
 		gui.fill_rect(canvas, backgroundRect)
 	end
 
-	-- commit block selection for this frame
 	blockSelected = newSelectedPass
 	blockSelect   = coordPass
 
-	-- scale mouse coords
 	inputs.mouse.x = inputs.mouse.x / gui.BUFFER_SCALE
 	inputs.mouse.y = inputs.mouse.y / gui.BUFFER_SCALE
 

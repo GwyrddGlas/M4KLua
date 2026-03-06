@@ -56,11 +56,13 @@ local sign = math.sign or function(x)
 end
 
 local function fill_rect(canvas, rect)
-	for yy = 0, rect.h - 1 do
-		for xx = 0, rect.w - 1 do
-			gui.points(canvas, rect.x + xx, rect.y + yy)
-		end
-	end
+	compat.rectangle(
+		canvas,
+		rect.x * BUFFER_SCALE,
+		rect.y * BUFFER_SCALE,
+		rect.w * BUFFER_SCALE,
+		rect.h * BUFFER_SCALE
+	)
 end
 
 local function draw_rect(canvas, rect, inset)
@@ -129,15 +131,13 @@ local function draw_line(canvas, tx, ty, fx, fy)
 end
 
 function gui.points(canvas, ...)
-	local tbl = {}
+	local scale = BUFFER_SCALE
+	local n = select("#", ...)
 
-	for _, v in ipairs({...}) do
-		table.insert(tbl, v * BUFFER_SCALE)
-	end
-
-	for i = 1, #(tbl) - 1 do
-		local x, y = tbl[i], tbl[i + 1]
-		compat.rectangle(canvas, x, y, BUFFER_SCALE, BUFFER_SCALE)
+	for i = 1, n, 2 do
+		local x = select(i, ...) * scale
+		local y = select(i + 1, ...) * scale
+		compat.rectangle(canvas, x, y, scale, scale)
 	end
 end
 
@@ -453,6 +453,31 @@ function gui.drawWorldListItem(canvas, item, x, y, mouseX, mouseY)
 	end
 
 	return hover
+end
+
+local function renderDirtToCanvas(canvas)
+	love.graphics.setCanvas(canvas)
+
+	for y = 0, BUFFER_H - 1 do
+		for x = 0, BUFFER_W - 1 do
+			local color = texts.textures[(
+				band(x, 0xF) +
+				band(y, 0xF) * 16 +
+				BLOCK_DIRT * 256 * 3
+			)]
+
+			setColor(
+				canvas,
+				rshift(band(rshift(color, 16), 0xFF), 1),
+				rshift(band(rshift(color, 8), 0xFF), 1),
+				rshift(band(color, 0xFF), 1)
+			)
+
+			compat.rectangle(canvas, x, y, 1, 1)
+		end
+	end
+
+	love.graphics.setCanvas()
 end
 
 function gui.dirtBg(canvas)
